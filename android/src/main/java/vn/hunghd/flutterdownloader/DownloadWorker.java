@@ -1,5 +1,6 @@
 package vn.hunghd.flutterdownloader;
 
+import android.Manifest;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -11,9 +12,11 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Build;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
@@ -28,9 +31,11 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
@@ -243,6 +248,8 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
         long downloadedBytes = 0;
         int responseCode;
         int times;
+        final boolean isSdk29 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
+        final ContentResolver contentResolver = getApplicationContext().getContentResolver();
 
         visited = new HashMap<>();
 
@@ -271,7 +278,7 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                 // setup request headers if it is set
                 setupHeaders(httpConn, headers);
                 // try to continue downloading a file from its partial downloaded data.
-                if (isResume) {
+                if (isResume && !isSdk29) {
                     downloadedBytes = setupPartialDownloadedDataHeader(httpConn, filename, savedDir);
                 }
 
@@ -317,6 +324,25 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                         }
                     }
                 }
+                ContentValues values = null;
+                Uri fileUri = null;
+                if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q){
+                    Uri collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+                    values = new ContentValues();
+                    values.put(MediaStore.Audio.Media.TITLE, filename);
+                    values.put(MediaStore.Audio.Media.DISPLAY_NAME, filename);
+                    values.put(MediaStore.Audio.Media.MIME_TYPE, "audio/*");
+                    values.put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis());
+                    if (isSdk29) {
+                        values.put(MediaStore.Audio.Media.RELATIVE_PATH,"Music");
+                        values.put(MediaStore.Audio.Media.DATE_TAKEN, System.currentTimeMillis());
+                        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+                    }
+                    fileUri = contentResolver.insert(collection, values);
+
+                }
+
+
                 saveFilePath = savedDir + File.separator + filename;
 
                 log("fileName = " + filename);
@@ -326,13 +352,35 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                 // opens input stream from the HTTP connection
                 inputStream = httpConn.getInputStream();
 
-                // opens an output stream to save into file
-                outputStream = new FileOutputStream(saveFilePath, isResume);
+
 
                 long count = downloadedBytes;
                 int bytesRead = -1;
                 byte[] buffer = new byte[BUFFER_SIZE];
-                while ((bytesRead = inputStream.read(buffer)) != -1 && !isStopped()) {
+                if(isSdk29){
+                    OutputStream opstream = contentResolver !=null ? contentResolver.openOutputStream(fileUri) : getApplicationContext().getContentResolver().openOutputStream(fileUri);
+                    while ((bytesRead = inputStream.read(buffer)) != -1 && !isStopped()) {
+                        count += bytesRead;
+                        int progress = (int) ((count * 100) / (contentLength + downloadedBytes));
+                        opstream.write(buffer, 0, bytesRead);
+
+                        if ((lastProgress == 0 || progress > lastProgress + STEP_UPDATE || progress == 100)
+                                && progress != lastProgress) {
+                            lastProgress = progress;
+                            updateNotification(context, filename, DownloadStatus.RUNNING, progress, null);
+
+                            // This line possibly causes system overloaded because of accessing to DB too many ?!!!
+                            // but commenting this line causes tasks loaded from DB missing current downloading progress,
+                            // however, this missing data should be temporary and it will be updated as soon as
+                            // a new bunch of data fetched and a notification sent
+                            taskDao.updateTask(getId().toString(), DownloadStatus.RUNNING, progress);
+                        }
+                    }
+                    opstream.close();
+                }else{
+                    // opens an output stream to save into file
+                    outputStream = new FileOutputStream(saveFilePath, isResume);
+                    while ((bytesRead = inputStream.read(buffer)) != -1 && !isStopped()) {
                     count += bytesRead;
                     int progress = (int) ((count * 100) / (contentLength + downloadedBytes));
                     outputStream.write(buffer, 0, bytesRead);
@@ -349,17 +397,24 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                         taskDao.updateTask(getId().toString(), DownloadStatus.RUNNING, progress);
                     }
                 }
+                }
 
                 DownloadTask task = taskDao.loadTask(getId().toString());
                 int progress = isStopped() && task.resumable ? lastProgress : 100;
                 int status = isStopped() ? (task.resumable ? DownloadStatus.PAUSED : DownloadStatus.CANCELED) : DownloadStatus.COMPLETE;
-                int storage = ContextCompat.checkSelfPermission(getApplicationContext(), android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                int storage = ContextCompat.checkSelfPermission(getApplicationContext(), Manifest.permission.WRITE_EXTERNAL_STORAGE);
                 PendingIntent pendingIntent = null;
                 if (status == DownloadStatus.COMPLETE) {
                     if (isImageOrVideoFile(contentType) && isExternalStoragePath(saveFilePath)) {
                         addImageOrVideoToGallery(filename, saveFilePath, getContentTypeWithoutCharset(contentType));
                     }
-
+                    if(contentType.startsWith("audio") && isSdk29){
+                        values.clear();
+                        if (isSdk29) {
+                            values.put(MediaStore.Audio.Media.IS_PENDING, 0);
+                        }
+                        contentResolver.update(fileUri, values, null, null);
+                    }
                     if (clickToOpenDownloadedFile && storage == PackageManager.PERMISSION_GRANTED) {
                         Intent intent = IntentUtils.validatedFileIntent(getApplicationContext(), saveFilePath, contentType);
                         if (intent != null) {

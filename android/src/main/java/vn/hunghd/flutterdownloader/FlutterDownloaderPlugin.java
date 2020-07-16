@@ -4,6 +4,8 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.os.Build;
+import android.provider.MediaStore;
 
 import androidx.core.app.NotificationManagerCompat;
 
@@ -316,15 +318,19 @@ public class FlutterDownloaderPlugin implements MethodCallHandler, FlutterPlugin
                 WorkManager.getInstance(context).cancelWorkById(UUID.fromString(taskId));
             }
             if (shouldDeleteContent) {
-                String filename = task.filename;
-                if (filename == null) {
-                    filename = task.url.substring(task.url.lastIndexOf("/") + 1, task.url.length());
-                }
+                if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q){
+                    context.getContentResolver().delete(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),MediaStore.Audio.Media.DISPLAY_NAME+"=?",new String[]{task.filename+".m4a"});
+                }else{
+                    String filename = task.filename;
+                    if (filename == null) {
+                        filename = task.url.substring(task.url.lastIndexOf("/") + 1, task.url.length());
+                    }
 
-                String saveFilePath = task.savedDir + File.separator + filename;
-                File tempFile = new File(saveFilePath);
-                if (tempFile.exists()) {
-                    tempFile.delete();
+                    String saveFilePath = task.savedDir + File.separator + filename;
+                    File tempFile = new File(saveFilePath);
+                    if (tempFile.exists()) {
+                        tempFile.delete();
+                    }
                 }
             }
             taskDao.deleteTask(taskId);
